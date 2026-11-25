@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VPN Share Proxy</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--fg:#1c2330;--mut:#667085;--line:#d9dde5;--acc:#2563eb;--ok:#1f9d55;--bad:#c0392b}
+@media (prefers-color-scheme:dark){:root{--bg:#11151c;--card:#1a2029;--fg:#e6e9ef;--mut:#98a2b3;--line:#2b3340;--acc:#5b8def;--ok:#34c26b;--bad:#ef6b5b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,Segoe UI,Tahoma,sans-serif}
+main{max-width:980px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0}
+h2{font-size:15px;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin:12px 0}
+.row{display:grid;grid-template-columns:230px 1fr auto;gap:8px;align-items:center;margin:6px 0}
+.row label{color:var(--mut)}
+input[type=text],input[type=password],input[type=number],select,textarea{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--fg);font:inherit}
+textarea{font-family:Consolas,monospace;font-size:12px;min-height:150px}
+button{padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer;font:inherit}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+#power{width:100%;padding:14px;font-size:20px;font-weight:700;color:#fff;border:0;border-radius:10px;background:var(--bad)}
+#power.on{background:var(--ok)}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;background:var(--line);margin-inline-end:6px;font-size:12px}
+.mut{color:var(--mut)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.chk{display:flex;gap:8px;align-items:center;margin:6px 0}
+pre#log{background:#0d1117;color:#c9d1d9;padding:10px;border-radius:8px;max-height:320px;overflow:auto;font-size:12px;margin:0;white-space:pre-wrap;word-break:break-all}
+#msg{min-height:20px;margin:6px 0;color:var(--mut)}
+@media (max-width:700px){.row{grid-template-columns:1fr}.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<div style="display:flex;justify-content:space-between;align-items:center">
+  <h1>VPN Share Proxy <span class="mut" id="ver"></span></h1>
+  <button id="quit">Quit program</button>
+</div>
+
+<div class="card">
+  <button id="power">OFF</button>
+  <div id="status" class="mut" style="margin-top:8px"></div>
+  <div class="row"><label>Phone / client (SOCKS5)</label><input type="text" id="link" readonly><button id="copy">Copy</button></div>
+</div>
+
+<div class="card">
+  <h2>Network</h2>
+  <div class="row"><label>ip net (the VPN route)</label><input type="text" id="ipnet" readonly><button id="test">Test</button></div>
+  <div class="row"><label>router ip (modem)</label><input type="text" id="routerip" readonly><button id="refresh">Refresh</button></div>
+  <div class="row"><label>eth ip (real network card)</label><input type="text" id="ethip" readonly><span></span></div>
+  <div id="testres" class="mut"></div>
+</div>
+
+<div class="card">
+  <h2>Lists (iran-hosted-domains) <span class="mut">اپدیت ip</span></h2>
+  <div id="listinfo" class="mut"></div>
+  <div style="margin:10px 0"><button class="primary" id="update">اپدیت ip / Update IP + lists</button> <span id="upstate" class="mut"></span></div>
+  <div class="grid2">
+    <div>
+      <div class="chk"><input type="checkbox" id="ads_block"><label for="ads_block">Ads block (uses the release's ads list)</label></div>
+      <div class="chk"><input type="checkbox" id="use_proxy_category"><label for="use_proxy_category">Proxy category: Iran-related domains blocked inside Iran go through the VPN</label></div>
+      <div class="chk"><input type="checkbox" id="domestic_tld_direct"><label for="domestic_tld_direct">Every *.ir goes straight through the modem</label></div>
+      <div class="chk"><input type="checkbox" id="download_all_assets"><label for="download_all_assets">Download every release file (not only the ones the engine reads)</label></div>
+      <div class="chk"><input type="checkbox" id="update_ripe"><label for="update_ripe">Also refresh RIPE_IR.json (Iranian IP ranges) on update</label></div>
+    </div>
+    <div>
+      <div class="row" style="grid-template-columns:150px 1fr"><label>List source</label><select id="list_source"><option>auto</option><option>dat</option><option>text</option></select></div>
+      <div class="row" style="grid-template-columns:150px 1fr"><label>Release tag</label><input type="text" id="release_tag" placeholder="latest or 202610230802"></div>
+      <div class="row" style="grid-template-columns:150px 1fr"><label>Auto update (hours, 0=off)</label><input type="number" id="auto_update_hours" min="0"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Proxy settings</h2>
+  <div class="row"><label>Listen address (auto = eth ip)</label><input type="text" id="listen_host"><span></span></div>
+  <div class="row"><label>Proxy port (SOCKS5 + HTTP)</label><input type="number" id="port"><span></span></div>
+  <div class="row"><label>Username (empty = no login)</label><input type="text" id="username"><span></span></div>
+  <div class="row"><label>Password</label><input type="password" id="password"><span></span></div>
+  <div class="row"><label>Upstream: auto, direct, host:port, http://, socks5://</label><input type="text" id="upstream"><span></span></div>
+  <div class="row"><label>Upstream username</label><input type="text" id="upstream_user"><span></span></div>
+  <div class="row"><label>Upstream password</label><input type="password" id="upstream_pass"><span></span></div>
+  <div class="row"><label>Modem DNS (auto = router ip)</label><input type="text" id="router_dns"><span></span></div>
+  <div class="row"><label>Network card IP (auto)</label><input type="text" id="nic_ip"><span></span></div>
+  <div class="row"><label>Router IP (auto)</label><input type="text" id="router_ip"><span></span></div>
+  <div class="row"><label>Idle timeout (seconds)</label><input type="number" id="idle_timeout_secs"><span></span></div>
+  <div class="row"><label>Settings UI port</label><input type="number" id="ui_port"><span></span></div>
+  <div class="chk"><input type="checkbox" id="sniff_sni"><label for="sniff_sni">Read the TLS server name (SNI) of connections made to bare IPs</label></div>
+  <div class="chk"><input type="checkbox" id="log_connections"><label for="log_connections">Log every connection and its route</label></div>
+  <div class="chk"><input type="checkbox" id="autostart_proxy"><label for="autostart_proxy">Start the proxy when the program starts</label></div>
+  <div class="chk"><input type="checkbox" id="open_ui_on_start"><label for="open_ui_on_start">Open this page when the program starts</label></div>
+  <div><button class="primary" id="save">Save and apply</button> <button id="reload">Discard changes</button></div>
+  <div id="msg"></div>
+</div>
+
+<div class="card">
+  <h2>Divert files <span class="mut">(always win over every list)</span></h2>
+  <div class="grid2">
+    <div><b>router_divert.json</b> <span class="mut">always straight through the modem</span>
+      <textarea id="t_router" spellcheck="false"></textarea>
+      <button data-save="router">Save and reload</button> <button data-load="router">Reload from disk</button></div>
+    <div><b>vpn_divert.json</b> <span class="mut">always through the VPN</span>
+      <textarea id="t_vpn" spellcheck="false"></textarea>
+      <button data-save="vpn">Save and reload</button> <button data-load="vpn">Reload from disk</button></div>
+  </div>
+  <div id="dmsg" class="mut"></div>
+  <p class="mut">Order: router_divert, vpn_divert, ads block (optional), proxy category (optional), Iran list, *.ir (optional), everything else through the VPN. For IPs: router_divert, vpn_divert, LAN, Iranian ranges (RIPE_IR.json), everything else through the VPN.</p>
+</div>
+
+<div class="card">
+  <h2>Activity</h2>
+  <div id="stats" class="mut" style="margin-bottom:8px"></div>
+  <pre id="log"></pre>
+</div>
+</main>
+<script>
+(function(){
+const token = new URLSearchParams(location.search).get('t') || '';
+const $ = id => document.getElementById(id);
+const BOOLS = ['ads_block','use_proxy_category','domestic_tld_direct','download_all_assets','update_ripe','sniff_sni','log_connections','autostart_proxy','open_ui_on_start'];
+const NUMS = ['port','auto_update_hours','idle_timeout_secs','ui_port'];
+const TEXTS = ['listen_host','username','password','upstream','upstream_user','upstream_pass','router_dns','nic_ip','router_ip','release_tag','list_source'];
+let state = null, filled = false, dirty = false;
+
+async function api(method, path, body){
+  const r = await fetch(path, {method, headers:{'X-Token':token,'Content-Type':'application/json'}, body: body===undefined?undefined:JSON.stringify(body)});
+  let j = {}; try { j = await r.json(); } catch(e) {}
+  j._status = r.status; return j;
+}
+function say(el, text, bad){ el.textContent = text; el.style.color = bad ? 'var(--bad)' : 'var(--mut)'; }
+function fillForm(s){
+  BOOLS.forEach(k => $(k).checked = !!s[k]);
+  NUMS.forEach(k => $(k).value = s[k]);
+  TEXTS.forEach(k => $(k).value = s[k] == null ? '' : s[k]);
+  dirty = false; filled = true;
+}
+function readForm(){
+  const o = Object.assign({}, state.settings);
+  BOOLS.forEach(k => o[k] = $(k).checked);
+  NUMS.forEach(k => o[k] = Number($(k).value));
+  TEXTS.forEach(k => o[k] = $(k).value);
+  return o;
+}
+function link(){
+  if(!state) return '';
+  const s = state.settings;
+  let host = s.listen_host && s.listen_host.toLowerCase() !== 'auto' ? s.listen_host : (state.nic ? state.nic.ip : '?');
+  const cred = s.username ? encodeURIComponent(s.username)+':'+encodeURIComponent(s.password)+'@' : '';
+  return 'socks5://'+cred+host+':'+s.port;
+}
+function render(){
+  if(!state) return;
+  $('ver').textContent = 'v'+state.version;
+  const p = $('power'); p.textContent = state.running ? 'ON' : 'OFF'; p.className = state.running ? 'on' : '';
+  const st = state.stats;
+  $('status').textContent = state.running ? 'Listening on '+state.listen+' - SOCKS5 and HTTP on the same port' : 'Stopped';
+  $('ipnet').value = state.ip_net;
+  $('routerip').value = state.nic && state.nic.gateway ? state.nic.gateway : '? (not found)';
+  $('ethip').value = state.nic ? state.nic.ip+'  ('+state.nic.name+', index '+state.nic.index+')' : '? (not found)';
+  $('link').value = link();
+  const L = state.lists, D = state.diverts, R = state.release;
+  $('listinfo').textContent = (R ? 'Release '+R.tag+' installed '+R.installed_at+' ('+R.verified+'/'+R.files+' files checksum-verified)' : 'No release downloaded yet - press the button')
+    + '  |  source '+(L.source||'-')+': '+L.iran+' Iranian, '+L.ads+' ads, '+L.proxy+' proxy-category domains  |  '+state.ranges+' Iranian IP ranges'
+    + '  |  divert: router '+D.router_domains+'+'+D.router_ranges+', vpn '+D.vpn_domains+'+'+D.vpn_ranges;
+  $('upstate').textContent = state.updating ? 'updating...' : '';
+  $('update').disabled = state.updating;
+  $('stats').textContent = 'open '+st.active+' | total '+st.total+' | modem '+st.router+' | VPN '+st.vpn+' | blocked '+st.blocked+' | failed '+st.failed
+    + ' | up '+fmtB(st.bytes_up)+' | down '+fmtB(st.bytes_down)+' | DNS cache '+state.dns_cache;
+  if(!filled) fillForm(state.settings);
+}
+function fmtB(n){ const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024 && i<4){ n/=1024; i++; } return n.toFixed(i?1:0)+' '+u[i]; }
+async function poll(){
+  try{
+    const s = await api('GET','/api/state');
+    if(s.version){ state = s; render(); }
+    const l = await api('GET','/api/log');
+    if(l.lines){ const el = $('log'); const atEnd = el.scrollTop+el.clientHeight >= el.scrollHeight-8; el.textContent = l.lines.join('\n'); if(atEnd) el.scrollTop = el.scrollHeight; }
+  }catch(e){ $('status').textContent = 'The program is not answering (closed?)'; }
+}
+document.querySelectorAll('input,select').forEach(e => e.addEventListener('input', () => { if(e.id) dirty = true; }));
+$('power').onclick = async () => { const r = await api('POST','/api/proxy',{on: !state.running}); if(r.ok===false) say($('msg'), r.error, true); poll(); };
+$('save').onclick = async () => {
+  const r = await api('POST','/api/settings', readForm());
+  if(r.ok){ say($('msg'), (r.notes||[]).join(' - ')); filled = false; } else say($('msg'), r.error || 'save failed', true);
+  poll();
+};
+$('reload').onclick = () => { filled = false; render(); say($('msg'),''); };
+$('copy').onclick = () => { navigator.clipboard.writeText($('link').value); };
+$('refresh').onclick = async () => { await api('POST','/api/nic/refresh'); poll(); };
+$('test').onclick = async () => {
+  say($('testres'),'testing both routes...'); const r = await api('POST','/api/test');
+  say($('testres'), 'VPN route exit IP: '+r.vpn+'   |   modem route exit IP: '+r.router);
+};
+$('update').onclick = async () => {
+  if(dirty && !confirm('You have unsaved settings. Update uses the saved settings. Continue?')) return;
+  const r = await api('POST','/api/update'); if(r.ok===false) say($('msg'), r.error, true); poll();
+};
+$('quit').onclick = async () => { if(confirm('Stop the proxy and close the program?')){ await api('POST','/api/quit'); } };
+async function loadDivert(w){ const r = await api('GET','/api/divert?which='+w); if(r.text!==undefined) $('t_'+w).value = r.text; }
+async function saveDivert(w){
+  const r = await api('POST','/api/divert?which='+w, {text: $('t_'+w).value});
+  if(r.ok){ say($('dmsg'), w+' saved'+((r.warnings&&r.warnings.length)?' - warnings: '+r.warnings.join('; '):'')); } else say($('dmsg'), r.error||'save failed', true);
+  poll();
+}
+document.querySelectorAll('[data-save]').forEach(b => b.onclick = () => saveDivert(b.dataset.save));
+document.querySelectorAll('[data-load]').forEach(b => b.onclick = () => loadDivert(b.dataset.load));
+loadDivert('router'); loadDivert('vpn'); poll(); setInterval(poll, 2000);
+})();
+</script>
+</body>
+</html>
