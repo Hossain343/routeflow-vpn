@@ -1,0 +1,48 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpnshare-windows-x64
+          path: target/release/vpnshare.exe
+          if-no-files-found: error
+
+      - name: Create Release
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v3.0.0-windows
+          name: vpnshare v3.0.0 (Windows x64)
+          body: |
+            Windows release build of vpnshare.
+
+            - Run as Administrator once (creates firewall rule)
+            - Place config.json / router_divert.json / vpn_divert.json next to the exe if needed
+          files: target/release/vpnshare.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
