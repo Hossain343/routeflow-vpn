@@ -123,6 +123,7 @@ pub fn ifindex_for_ip(ip: Ipv4Addr) -> Option<u32> {
     let n = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
     let target = u32::from_le_bytes(ip.octets());
     for i in 0..n {
+        // MIB_IPADDRROW is 24 bytes: addr, index, mask, bcast, reasm(+2 pad words)
         let off = 4 + i * 24;
         if off + 8 > buf.len() {
             break;
@@ -147,6 +148,7 @@ fn set_unicast_if(raw: u64, v6: bool, index: u32) -> io::Result<()> {
     const IPPROTO_IPV6: i32 = 41;
     const IP_UNICAST_IF: i32 = 31;
     const IPV6_UNICAST_IF: i32 = 31;
+    // IPv4 wants the index in network byte order, IPv6 in host order
     let (level, opt, val): (i32, i32, u32) = if v6 {
         (IPPROTO_IPV6, IPV6_UNICAST_IF, index)
     } else {
@@ -180,6 +182,17 @@ fn force_udp(_sock: &std::net::UdpSocket, _index: u32) -> io::Result<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------------ sockets bound to the modem card
+
+// ------------------------------------------------------------------ per-destination host routes
+//
+// Some VPNs remove or hide the default route of the real network card. Then a socket that is
+// locked to that card can still talk to the modem itself (on-link, so the modem DNS works) but
+// every remote address fails with "network unreachable" (WSAENETUNREACH, 10051). In that case a
+// /32 route "this address -> via the modem, on the real card" is added (needs Administrator).
+// A /32 beats any VPN route by longest-prefix match, so only that one address is affected.
+// Added routes are remembered in data/host_routes.txt and removed on exit / next start.
+
 const MAX_HOST_ROUTES: usize = 1500;
 
 fn routes() -> &'static Mutex<HashSet<Ipv4Addr>> {
@@ -202,6 +215,7 @@ fn already_routed(ip: Ipv4Addr) -> bool {
     routes().lock().unwrap_or_else(|e| e.into_inner()).contains(&ip)
 }
 
+/// WSAENETUNREACH / WSAEHOSTUNREACH
 pub fn is_unreachable(e: &io::Error) -> bool {
     matches!(e.raw_os_error(), Some(10051) | Some(10065))
 }
@@ -255,6 +269,7 @@ fn delete_route(ip: Ipv4Addr) {
         .output();
 }
 
+/// Remove every host route this run added. Returns how many.
 pub fn cleanup_host_routes() -> usize {
     let list: Vec<Ipv4Addr> = {
         let mut g = routes().lock().unwrap_or_else(|e| e.into_inner());
@@ -269,6 +284,7 @@ pub fn cleanup_host_routes() -> usize {
     list.len()
 }
 
+/// Remove routes a previous run (crash, closed window) left behind.
 pub fn cleanup_stale_routes(path: &Path) -> usize {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -298,25 +314,9 @@ fn nic_ctx(nic: &NicInfo, e: io::Error) -> io::Error {
     io::Error::new(kind, msg)
 }
 
+/// TCP connection through the real network card. If Windows says the network is unreachable
+/// (the VPN hid the card's default route) a host route via the modem is added and it retries once.
 async fn connect_once(nic: &NicInfo, ip: IpAddr, port: u16) -> io::Result<TcpStream> {
-    let v6 = ip.is_ipv6();
-    let sock = if v6 { TcpSocket::new_v6()? } else { TcpSocket::new_v4()? };
-    force_tcp(&sock, v6, nic.index)
-        .map_err(|e| io::Error::new(e.kind(), format!("cannot lock the socket to the modem card (index {}): {}", nic.index, e)))?;
-    if !v6 {
-        sock.bind(SocketAddr::new(IpAddr::V4(nic.ip), 0))?;
-    }
-    match tokio::time::timeout(Duration::from_secs(10), sock.connect(SocketAddr::new(ip, port))).await {
-        Ok(r) => {
-            let s = r?;
-            let _ = s.set_nodelay(true);
-            Ok(s)
-        }
-        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, format!("connecting to {}:{} through the modem timed out", ip, port))),
-    }
-}
-
-pub async fn connect_tcp_on_nic(nic: &NicInfo, ip: IpAddr, port: u16) -> io::Result<TcpStream> {
     match connect_once(nic, ip, port).await {
         Ok(s) => Ok(s),
         Err(e) if is_unreachable(&e) => {
@@ -342,6 +342,27 @@ pub async fn connect_tcp_on_nic(nic: &NicInfo, ip: IpAddr, port: u16) -> io::Res
     }
 }
 
+/// TCP connection that leaves through the real network card (IP_UNICAST_IF + source bind),
+/// so it reaches the modem directly even if a VPN adapter owns the default route.
+pub async fn connect_tcp_on_nic(nic: &NicInfo, ip: IpAddr, port: u16) -> io::Result<TcpStream> {
+    let v6 = ip.is_ipv6();
+    let sock = if v6 { TcpSocket::new_v6()? } else { TcpSocket::new_v4()? };
+    force_tcp(&sock, v6, nic.index)
+        .map_err(|e| io::Error::new(e.kind(), format!("cannot lock the socket to the modem card (index {}): {}", nic.index, e)))?;
+    if !v6 {
+        sock.bind(SocketAddr::new(IpAddr::V4(nic.ip), 0))?;
+    }
+    match tokio::time::timeout(Duration::from_secs(10), sock.connect(SocketAddr::new(ip, port))).await {
+        Ok(r) => {
+            let s = r?;
+            let _ = s.set_nodelay(true);
+            Ok(s)
+        }
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, format!("connecting to {}:{} through the modem timed out", ip, port))),
+    }
+}
+
+/// UDP socket that leaves through the real network card.
 pub fn bind_udp_on_nic(nic: &NicInfo) -> io::Result<UdpSocket> {
     let std_sock = std::net::UdpSocket::bind(SocketAddr::new(IpAddr::V4(nic.ip), 0))?;
     force_udp(&std_sock, nic.index)
@@ -349,6 +370,8 @@ pub fn bind_udp_on_nic(nic: &NicInfo) -> io::Result<UdpSocket> {
     std_sock.set_nonblocking(true)?;
     UdpSocket::from_std(std_sock)
 }
+
+// ------------------------------------------------------------------ NIC detection
 
 #[cfg(windows)]
 const PS_SCRIPT: &str = r#"
@@ -372,6 +395,8 @@ fn run_route_print() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Find the physical network card (the one cabled/Wi-Fi'd to the modem), its index and the modem IP.
+/// `manual_ip` / `manual_gw` ("auto" or an IPv4) override the detection.
 pub async fn detect_nic(manual_ip: &str, manual_gw: &str) -> Result<NicInfo, String> {
     let mi = manual_ip.trim().to_string();
     let mg = manual_gw.trim().to_string();
@@ -399,6 +424,7 @@ fn detect_nic_blocking(manual_ip: &str, manual_gw: &str) -> Result<NicInfo, Stri
         return Ok(NicInfo { name: "manual".into(), ip, index, gateway });
     }
 
+    // 1) PowerShell: only physical adapters that are up and have a default route
     let ps = hidden_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PS_SCRIPT])
         .output();
@@ -421,6 +447,7 @@ fn detect_nic_blocking(manual_ip: &str, manual_gw: &str) -> Result<NicInfo, Stri
     }
     log_warn!("physical-adapter detection failed ({}); falling back to the routing table", ps_error);
 
+    // 2) routing table only (cannot tell physical from virtual: set nic_ip if this picks wrong)
     let text = run_route_print()?;
     let (ip, gw) = parse_route_print_any(&text)
         .ok_or_else(|| "no default route found; connect to the modem or set nic_ip in Settings".to_string())?;
@@ -439,6 +466,9 @@ fn detect_nic_blocking(manual_ip: &str, manual_gw: &str) -> Result<NicInfo, Stri
     Ok(NicInfo { name: "manual".into(), ip, index: 1, gateway })
 }
 
+// ------------------------------------------------------------------ misc
+
+/// Allow inbound TCP on the proxy port and inbound UDP for this program (needs Administrator).
 pub fn add_firewall_rules(port: u16) -> bool {
     const RULE: &str = "VPN Share Proxy";
     let _ = hidden_command("netsh")
@@ -450,26 +480,54 @@ pub fn add_firewall_rules(port: u16) -> bool {
             "protocol=TCP", &format!("localport={}", port),
         ])
         .output();
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
     let udp = hidden_command("netsh")
         .args([
-            "advfirewall", "firewall", "add", "rule", &format!("name={}-UDP", RULE), "dir=in", "action=allow",
-            "protocol=UDP", "program=any",
+            "advfirewall", "firewall", "add", "rule", &format!("name={}", RULE), "dir=in", "action=allow",
+            "protocol=UDP", &format!("program={}", exe),
         ])
         .output();
-    matches!((tcp, udp), (Ok(t), Ok(u)) if t.status.success() && u.status.success())
+    matches!((&tcp, &udp), (Ok(a), Ok(b)) if a.status.success() && b.status.success())
 }
 
-/// Open a URL in the default browser (Windows: `cmd /c start`, other: `xdg-open`).
 pub fn open_url(url: &str) {
     #[cfg(windows)]
     {
-        let mut c = std::process::Command::new("cmd");
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(CREATE_NO_WINDOW);
-        let _ = c.args(["/C", "start", "", url]).spawn();
+        if let Err(e) = hidden_command("cmd").args(["/C", "start", "", url]).spawn() {
+            log_warn!("could not open the browser: {} (open {} yourself)", e, url);
+        }
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        let _ = url;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ROUTE: &str = "IPv4 Route Table\n===\nActive Routes:\nNetwork Destination        Netmask          Gateway       Interface  Metric\n          0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.50     25\n          0.0.0.0        128.0.0.0         10.8.0.1       10.8.0.2      5\n          0.0.0.0          0.0.0.0         10.8.0.1       10.8.0.2      6\n          0.0.0.0          0.0.0.0         On-link      192.168.1.50   300\n";
+
+    #[test]
+    fn gateway_from_route_table() {
+        assert_eq!(parse_route_print(ROUTE, "192.168.1.50".parse().unwrap()), Some("192.168.1.1".parse().unwrap()));
+        assert_eq!(parse_route_print(ROUTE, "10.8.0.2".parse().unwrap()), Some("10.8.0.1".parse().unwrap()));
+        assert_eq!(parse_route_print(ROUTE, "1.1.1.1".parse().unwrap()), None);
+        // lowest metric overall is the VPN default route: documents why PowerShell detection comes first
+        assert_eq!(parse_route_print_any(ROUTE).unwrap().0, "10.8.0.2".parse::<Ipv4Addr>().unwrap());
+    }
+
+    #[test]
+    fn nic_json_object_and_array() {
+        let one = r#"{"name":"Wi-Fi","index":12,"ip":"192.168.1.50","gw":"192.168.1.1","metric":25}"#;
+        let l = parse_nic_json(one).unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].1.index, 12);
+        let two = r#"[{"name":"A","index":3,"ip":"10.0.0.2","gw":"10.0.0.1","metric":50},{"name":"B","index":4,"ip":"192.168.1.50","gw":"192.168.1.1","metric":10}]"#;
+        let l = parse_nic_json(two).unwrap();
+        assert_eq!(l[0].1.name, "B");
+        assert!(parse_nic_json("[]").unwrap().is_empty());
+        assert!(parse_nic_json("garbage").is_err());
     }
 }
